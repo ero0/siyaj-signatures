@@ -155,7 +155,7 @@ def phishing(top: set[str]) -> set[int]:
 def malware(auth_key: str) -> set[int]:
     out: set[int] = set()
     try:
-        res = json.loads(get(URLHAUS, data=b"", headers={"Auth-Key": auth_key}))
+        res = json.loads(get(URLHAUS, headers={"Auth-Key": auth_key}))
     except urllib.error.HTTPError as e:
         print(f"::warning::URLhaus HTTP {e.code}")
         return out
