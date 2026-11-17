@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["build_feed.py", ".github/workflows/**"]
+    paths: ["build_feed.py", "build_urls.py", ".github/workflows/**"]
 
 permissions:
   contents: write
@@ -37,3 +37,14 @@ jobs:
           git add signatures.txt signatures.sig
           git commit -m "feed: update $(date -u +%Y-%m-%dT%H:%MZ)"
           git push
+      - name: Build and sign URL feed
+        env:
+          MB_AUTH_KEY: ${{ secrets.MB_AUTH_KEY }}
+          SIYAJ_SIGNING_KEY: ${{ secrets.SIYAJ_SIGNING_KEY }}
+        run: python build_urls.py
+      - name: Publish URL feed release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view feed >/dev/null 2>&1 || gh release create feed --title "Siyaj feed" --notes "Signed URL reputation feed (urls.bin + urls.sig). Updated automatically." --latest=false
+          gh release upload feed urls.bin urls.sig --clobber

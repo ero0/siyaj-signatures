@@ -1,3 +1,6 @@
 *.pem
 *.key
 __pycache__/
+urls.bin
+urls.sig
+canon-fixture.tsv
