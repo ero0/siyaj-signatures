@@ -25,6 +25,15 @@ SIG = "signatures.sig"
 MAX_ENTRIES = 100_000
 API = "https://mb-api.abuse.ch/api/v1/"
 FILE_TYPES = ["apk", "dex"]
+# Well-known Android malware families: pull their history too, not just the latest uploads.
+FAMILIES = [
+    "SpyNote", "Anatsa", "Hydra", "Cerberus", "Alien", "Hook", "ERMAC", "Octo", "Coper", "Xenomorph",
+    "SharkBot", "TeaBot", "FluBot", "Joker", "Harly", "Konfety", "SpyMax", "AhMyth", "CraxsRAT", "Cypher",
+    "IRATA", "BRATA", "Vultur", "GodFather", "Chameleon", "BianLian", "Medusa", "TgToxic", "Rafel", "Mirai",
+    "PixPirate", "Rokrat", "DeathRAT", "SpinOk", "Necro", "Triada", "Anubis", "Gigabud", "MoqHao", "Copybara",
+]
+GENERIC_TAGS = {"apk", "dex", "android", "elf", "zip", "jar", "malware", "trojan", "rat", "banker", "spyware", "signed", "unsigned"}
+IP_RE = re.compile(r"^\d{1,3}([.-]\d{1,3}){3}$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -34,7 +43,11 @@ def fail(msg: str) -> None:
 
 
 def query(auth_key: str, file_type: str) -> list[dict]:
-    body = urllib.parse.urlencode({"query": "get_file_type", "file_type": file_type, "limit": 1000}).encode()
+    return api(auth_key, {"query": "get_file_type", "file_type": file_type, "limit": 1000}, file_type)
+
+
+def api(auth_key: str, params: dict, label: str) -> list[dict]:
+    body = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(API, data=body, headers={"Auth-Key": auth_key, "User-Agent": "siyaj-feed-builder"})
     with urllib.request.urlopen(req, timeout=60) as r:
         res = json.load(r)
@@ -42,14 +55,17 @@ def query(auth_key: str, file_type: str) -> list[dict]:
     if status == "no_results":
         return []
     if status != "ok":
-        print(f"::warning::MalwareBazaar query_status for file_type={file_type}: {status}")
+        print(f"::warning::MalwareBazaar query_status for {label}: {status}")
         return []
     return res.get("data") or []
 
 
 def family(item: dict) -> str:
-    raw = item.get("signature") or next(iter(item.get("tags") or []), None) or "Generic"
-    name = re.sub(r"[^A-Za-z0-9._-]", "", str(raw))[:40] or "Generic"
+    def useful(t) -> bool:
+        t = str(t).strip()
+        return bool(t) and t.lower() not in GENERIC_TAGS and not IP_RE.match(t) and not t.lower().startswith(("http", "certificat"))
+    raw = item.get("signature") if useful(item.get("signature") or "") else next((t for t in item.get("tags") or [] if useful(t)), None)
+    name = re.sub(r"[^A-Za-z0-9._-]", "", str(raw or ""))[:40] or "Malware"
     return f"Android.{name}"
 
 
@@ -62,7 +78,10 @@ def load_existing() -> dict[str, str]:
                 continue
             h, _, name = line.partition("|")
             if HASH_RE.match(h):
-                out[h] = name or "Android.Generic"
+                n = name.removeprefix("Android.")
+                if not n or n.lower() in GENERIC_TAGS or IP_RE.match(n) or n.lower().startswith("certificat"):
+                    name = "Android.Malware"
+                out[h] = name or "Android.Malware"
     return out
 
 
@@ -93,6 +112,20 @@ def main() -> None:
             if HASH_RE.match(h):
                 fresh.setdefault(h, family(item))
 
+    for fam in FAMILIES:
+        try:
+            items = api(auth_key, {"query": "get_siginfo", "signature": fam, "limit": 1000}, f"signature={fam}")
+        except urllib.error.HTTPError as e:
+            print(f"::warning::MalwareBazaar HTTP {e.code} for signature={fam}")
+            continue
+        apks = [i for i in items if str(i.get("file_type", "")).lower() in FILE_TYPES]
+        print(f"signature={fam}: {len(apks)} android samples")
+        for item in apks:
+            h = str(item.get("sha256_hash", "")).lower()
+            if HASH_RE.match(h):
+                fresh.setdefault(h, f"Android.{fam}")
+        time.sleep(0.5)  # be gentle with the free API
+
     if not fresh:
         fail("MalwareBazaar returned no samples for any file type (see warnings above)")
     existing = load_existing()
@@ -102,7 +135,8 @@ def main() -> None:
     entries = list(merged.items())[:MAX_ENTRIES]
 
     new = len(set(fresh) - set(existing))
-    if new == 0 and existing:
+    relabeled = any(existing.get(h) != n for h, n in entries if h in existing)
+    if new == 0 and existing and not relabeled:
         print(f"No new hashes ({len(existing)} total); leaving feed unchanged.")
         return
 
