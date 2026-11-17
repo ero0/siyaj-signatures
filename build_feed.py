@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -27,6 +28,11 @@ FILE_TYPES = ["apk", "dex"]
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+def fail(msg: str) -> None:
+    print(f"::error::{msg}")
+    raise SystemExit(1)
+
+
 def query(auth_key: str, file_type: str) -> list[dict]:
     body = urllib.parse.urlencode({"query": "get_file_type", "file_type": file_type, "limit": 1000}).encode()
     req = urllib.request.Request(API, data=body, headers={"Auth-Key": auth_key, "User-Agent": "siyaj-feed-builder"})
@@ -36,7 +42,8 @@ def query(auth_key: str, file_type: str) -> list[dict]:
     if status == "no_results":
         return []
     if status != "ok":
-        raise SystemExit(f"MalwareBazaar error for {file_type}: {status}")
+        print(f"::warning::MalwareBazaar query_status for file_type={file_type}: {status}")
+        return []
     return res.get("data") or []
 
 
@@ -60,16 +67,34 @@ def load_existing() -> dict[str, str]:
 
 
 def main() -> None:
-    auth_key = os.environ["MB_AUTH_KEY"].strip()
-    key = serialization.load_pem_private_key(os.environ["SIYAJ_SIGNING_KEY"].encode(), password=None)
+    auth_key = os.environ.get("MB_AUTH_KEY", "").strip()
+    pem = os.environ.get("SIYAJ_SIGNING_KEY", "").strip()
+    if not auth_key:
+        fail("MB_AUTH_KEY secret is empty or missing (must be an Actions secret)")
+    if not pem:
+        fail("SIYAJ_SIGNING_KEY secret is empty or missing (must be an Actions secret)")
+    try:
+        key = serialization.load_pem_private_key(pem.encode(), password=None)
+    except Exception as e:
+        fail(f"SIYAJ_SIGNING_KEY is not a valid PEM private key ({type(e).__name__}); paste the whole file incl. BEGIN/END lines")
 
     fresh: dict[str, str] = {}
     for ft in FILE_TYPES:
-        for item in query(auth_key, ft):
+        try:
+            items = query(auth_key, ft)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                fail(f"MalwareBazaar rejected MB_AUTH_KEY (HTTP {e.code}); regenerate it at auth.abuse.ch")
+            print(f"::warning::MalwareBazaar HTTP {e.code} for file_type={ft}")
+            continue
+        print(f"file_type={ft}: {len(items)} samples")
+        for item in items:
             h = str(item.get("sha256_hash", "")).lower()
             if HASH_RE.match(h):
                 fresh.setdefault(h, family(item))
 
+    if not fresh:
+        fail("MalwareBazaar returned no samples for any file type (see warnings above)")
     existing = load_existing()
     merged = dict(fresh)                       # newest first
     for h, n in existing.items():
