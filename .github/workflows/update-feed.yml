@@ -1,0 +1,36 @@
+name: Update signature feed
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: feed
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cryptography==44.0.0
+      - name: Build and sign feed
+        env:
+          MB_AUTH_KEY: ${{ secrets.MB_AUTH_KEY }}
+          SIYAJ_SIGNING_KEY: ${{ secrets.SIYAJ_SIGNING_KEY }}
+        run: python build_feed.py
+      - name: Commit
+        run: |
+          if git diff --quiet -- signatures.txt signatures.sig; then echo "nothing to commit"; exit 0; fi
+          git config user.name "siyaj-feed-bot"
+          git config user.email "siyaj-feed-bot@users.noreply.github.com"
+          git add signatures.txt signatures.sig
+          git commit -m "feed: update $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
